@@ -420,6 +420,22 @@ def render_repo_section(repo: dict[str, Any]) -> str:
     """
 
 
+def redact_sensitive_report(report: dict[str, Any]) -> dict[str, Any]:
+    redacted = json.loads(json.dumps(report))
+    for repo in redacted.get("repositories", []):
+        repo["secret_scanning"] = []
+        if "counts" in repo and "secret_scanning" in repo["counts"]:
+            repo["counts"]["secret_scanning"] = 0
+    if "totals" in redacted and "secret_scanning" in redacted["totals"]:
+        redacted["totals"]["secret_scanning"] = 0
+        redacted["totals"]["open_alerts"] = (
+            redacted["totals"].get("dependabot", 0)
+            + redacted["totals"].get("code_scanning", 0)
+            + redacted["totals"].get("secret_scanning", 0)
+        )
+    return redacted
+
+
 def render_html(report: dict[str, Any]) -> str:
     totals = report["totals"]
     repos = report["repositories"]
@@ -658,6 +674,7 @@ def main() -> int:
     client = GitHubClient(args.token)
     report = build_report(client, args.user)
     print_summary(report)
+    safe_report = redact_sensitive_report(report)
 
     html_path = Path(args.output)
     if html_path.suffix.lower() != ".html":
@@ -669,14 +686,14 @@ def main() -> int:
         )
         html_path = corrected
 
-    html_path.write_text(render_html(report), encoding="utf-8")
+    html_path.write_text(render_html(safe_report), encoding="utf-8")
     print(f"\nWrote HTML report to {html_path.resolve()}")
 
     if args.json:
         json_path = Path(args.json)
         if json_path.suffix.lower() != ".json":
             json_path = json_path.with_suffix(".json")
-        json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        json_path.write_text(json.dumps(safe_report, indent=2), encoding="utf-8")
         print(f"Wrote JSON report to {json_path.resolve()}")
 
     if not args.no_open:

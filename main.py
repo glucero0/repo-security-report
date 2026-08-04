@@ -62,10 +62,6 @@ class GitHubClient:
     def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
         url = path if path.startswith("http") else f"{API}{path}"
         response = self.session.get(url, params=params, timeout=60)
-        # Alerts endpoints often return 404/403/422 when a feature is off
-        # or the token cannot read that alert type for the repo.
-        if response.status_code in {403, 404, 410, 422}:
-            return []
         if response.status_code >= 400:
             detail = ""
             try:
@@ -109,9 +105,23 @@ def list_public_repos(client: GitHubClient, username: str | None) -> list[dict[s
     return [r for r in repos if not r.get("private") and not r.get("fork")]
 
 
-def fetch_alerts(client: GitHubClient, owner: str, repo: str) -> dict[str, list[Any]]:
+def _alert_access_note(status: int) -> str:
+    if status == 403:
+        return "no access (token missing permission)"
+    if status in {404, 410}:
+        return "not enabled or unavailable"
+    if status == 422:
+        return "unavailable"
+    return f"unavailable ({status})"
+
+
+def fetch_alerts(
+    client: GitHubClient, owner: str, repo: str
+) -> tuple[dict[str, list[Any]], dict[str, str]]:
+    """Return open alerts plus per-source access notes when fetch fails."""
     base = f"/repos/{owner}/{repo}"
     results: dict[str, list[Any]] = {}
+    notes: dict[str, str] = {}
     endpoints = {
         "dependabot": f"{base}/dependabot/alerts",
         "code_scanning": f"{base}/code-scanning/alerts",
@@ -124,9 +134,10 @@ def fetch_alerts(client: GitHubClient, owner: str, repo: str) -> dict[str, list[
             status = exc.response.status_code if exc.response is not None else 0
             if status and status < 500:
                 results[key] = []
+                notes[key] = _alert_access_note(status)
             else:
                 raise
-    return results
+    return results, notes
 
 
 def summarize_dependabot(alert: dict[str, Any]) -> dict[str, Any]:
@@ -198,7 +209,7 @@ def build_report(client: GitHubClient, username: str | None) -> dict[str, Any]:
         print(f"[{i}/{len(repos)}] {full_name}...", end=" ", flush=True)
 
         try:
-            raw = fetch_alerts(client, owner, name)
+            raw, access_notes = fetch_alerts(client, owner, name)
         except requests.HTTPError as exc:
             print(f"skipped ({exc})")
             continue
@@ -217,11 +228,23 @@ def build_report(client: GitHubClient, username: str | None) -> dict[str, Any]:
         totals["repos_scanned"] += 1
 
         open_total = sum(counts.values())
+
+        def _count_label(key: str, label: str) -> str:
+            if key in access_notes:
+                return f"{label} ({access_notes[key]})"
+            return f"{counts[key]} {label}"
+
+        suffix = ""
+        if access_notes:
+            suffix = " (incomplete)"
+        elif open_total == 0:
+            suffix = " (clean)"
+
         print(
-            f"{counts['dependabot']} dependabot, "
-            f"{counts['code_scanning']} code-scanning, "
-            f"{counts['secret_scanning']} secret-scanning"
-            + ("" if open_total else " (clean)")
+            f"{_count_label('dependabot', 'dependabot')}, "
+            f"{_count_label('code_scanning', 'code-scanning')}, "
+            f"{_count_label('secret_scanning', 'secret-scanning')}"
+            + suffix
         )
 
         repo_reports.append(
@@ -230,6 +253,7 @@ def build_report(client: GitHubClient, username: str | None) -> dict[str, Any]:
                 "html_url": repo.get("html_url"),
                 "security_url": f"{repo.get('html_url')}/security",
                 "counts": counts,
+                "access_notes": access_notes,
                 "alerts": {
                     "dependabot": dependabot,
                     "code_scanning": code_scanning,
@@ -356,16 +380,35 @@ def render_alert_section(title: str, count: int, table_html: str) -> str:
 def render_repo_section(repo: dict[str, Any]) -> str:
     counts = repo["counts"]
     total = sum(counts.values())
-    status = "has-alerts" if total else "clean"
-    status_label = f"{total} open" if total else "clean"
+    access_notes = repo.get("access_notes") or {}
+    status = "has-alerts" if total else ("incomplete" if access_notes else "clean")
+    if total:
+        status_label = f"{total} open"
+    elif access_notes:
+        status_label = "incomplete"
+    else:
+        status_label = "clean"
 
     dependabot = repo["alerts"]["dependabot"]
     code_scanning = repo["alerts"]["code_scanning"]
     secret_scanning = repo["alerts"]["secret_scanning"]
 
     body = ""
-    if total == 0:
-        body = '<p class="clean-msg">No open security alerts.</p>'
+    if access_notes:
+        note_items = "".join(
+            f"<li><strong>{esc(key.replace('_', ' '))}</strong>: {esc(note)}</li>"
+            for key, note in access_notes.items()
+        )
+        body += f"""
+        <div class="access-notes">
+          <p>Some alert sources could not be read with the current token:</p>
+          <ul>{note_items}</ul>
+        </div>
+        """
+    if total == 0 and not access_notes:
+        body += '<p class="clean-msg">No open security alerts.</p>'
+    elif total == 0 and access_notes:
+        body += '<p class="clean-msg">No readable open alerts (see access notes above).</p>'
     else:
         if dependabot:
             body += render_alert_section(
@@ -522,7 +565,18 @@ def render_html(report: dict[str, Any]) -> str:
     }}
     .status.clean {{ background: #dcfce7; color: var(--clean); }}
     .status.has-alerts {{ background: #ffedd5; color: var(--high); }}
+    .status.incomplete {{ background: #eef2f6; color: var(--muted); }}
     .clean-msg {{ margin: 0.9rem 0 0; color: var(--clean); }}
+    .access-notes {{
+      margin: 0.9rem 0 0;
+      padding: 0.75rem 0.9rem;
+      background: #f8fafc;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }}
+    .access-notes ul {{ margin: 0.35rem 0 0; padding-left: 1.1rem; }}
     .alert-group {{ margin-top: 1rem; }}
     .alert-group h3 {{
       margin: 0 0 0.55rem;

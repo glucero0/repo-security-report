@@ -18,6 +18,7 @@ import argparse
 import html
 import json
 import os
+import re
 import sys
 import webbrowser
 from collections import defaultdict
@@ -59,9 +60,13 @@ class GitHubClient:
             }
         )
 
-    def get(self, path: str, params: dict[str, Any] | None = None) -> Any:
+    def get(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> tuple[Any, requests.Response]:
         url = path if path.startswith("http") else f"{API}{path}"
-        response = self.session.get(url, params=params, timeout=60)
+        # When following Link headers, pass a full URL and do not re-apply params.
+        request_params = None if path.startswith("http") else params
+        response = self.session.get(url, params=request_params, timeout=60)
         if response.status_code >= 400:
             detail = ""
             try:
@@ -72,25 +77,36 @@ class GitHubClient:
                 f"{response.status_code} for {path}: {detail}",
                 response=response,
             )
-        return response.json()
+        return response.json(), response
 
     def paginate(self, path: str, params: dict[str, Any] | None = None) -> list[Any]:
+        """Paginate using Link headers (works for page- and cursor-based APIs)."""
         params = dict(params or {})
         params.setdefault("per_page", PER_PAGE)
-        page = 1
         items: list[Any] = []
+        next_url: str | None = path
 
-        while True:
-            params["page"] = page
-            batch = self.get(path, params)
+        while next_url:
+            batch, response = self.get(next_url, params if next_url == path else None)
             if not isinstance(batch, list):
                 raise RuntimeError(f"Expected a list from {path}, got {type(batch)}")
             items.extend(batch)
-            if len(batch) < PER_PAGE:
-                break
-            page += 1
+            next_url = _link_next(response.headers.get("Link"))
 
         return items
+
+
+def _link_next(link_header: str | None) -> str | None:
+    if not link_header:
+        return None
+    for part in link_header.split(","):
+        section = part.strip()
+        if 'rel="next"' not in section:
+            continue
+        match = re.match(r'<([^>]+)>', section)
+        if match:
+            return match.group(1)
+    return None
 
 
 def list_public_repos(client: GitHubClient, username: str | None) -> list[dict[str, Any]]:
@@ -105,13 +121,25 @@ def list_public_repos(client: GitHubClient, username: str | None) -> list[dict[s
     return [r for r in repos if not r.get("private") and not r.get("fork")]
 
 
-def _alert_access_note(status: int) -> str:
+def _alert_access_note(status: int, message: str = "") -> str | None:
+    """Return a user-facing note, or None when the failure just means 'no alerts'."""
+    lowered = message.lower()
+    # Feature disabled / not set up is not a permission problem and not an alert.
+    if status in {404, 410} and (
+        "disabled" in lowered
+        or "not enabled" in lowered
+        or "no analysis" in lowered
+        or "advanced security" in lowered
+    ):
+        return None
+    if status in {404, 410}:
+        return None
     if status == 403:
         return "no access (token missing permission)"
-    if status in {404, 410}:
-        return "not enabled or unavailable"
     if status == 422:
-        return "unavailable"
+        return "unavailable for this repository"
+    if status == 400 and "page" in lowered:
+        return "pagination error talking to GitHub API"
     return f"unavailable ({status})"
 
 
@@ -132,9 +160,17 @@ def fetch_alerts(
             results[key] = client.paginate(path, {"state": "open"})
         except requests.HTTPError as exc:
             status = exc.response.status_code if exc.response is not None else 0
+            message = ""
+            if exc.response is not None:
+                try:
+                    message = exc.response.json().get("message", "")
+                except Exception:
+                    message = exc.response.text[:200]
             if status and status < 500:
                 results[key] = []
-                notes[key] = _alert_access_note(status)
+                note = _alert_access_note(status, message)
+                if note:
+                    notes[key] = note
             else:
                 raise
     return results, notes
@@ -189,7 +225,7 @@ def summarize_secret_scanning(alert: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_report(client: GitHubClient, username: str | None) -> dict[str, Any]:
-    me = client.get("/user")
+    me, _ = client.get("/user")
     if not isinstance(me, dict) or not me.get("login"):
         raise SystemExit("Failed to resolve authenticated user. Check GITHUB_TOKEN.")
 
@@ -401,7 +437,7 @@ def render_repo_section(repo: dict[str, Any]) -> str:
         )
         body += f"""
         <div class="access-notes">
-          <p>Some alert sources could not be read with the current token:</p>
+          <p>Could not check some alert sources (this is not a vulnerability list):</p>
           <ul>{note_items}</ul>
         </div>
         """

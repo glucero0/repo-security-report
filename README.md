@@ -1,6 +1,7 @@
 # Repo Security Report
 
-One command that pulls open GitHub security alerts for all of your **public** repositories and writes a self-contained HTML report you can open in a browser.
+- Simple Python app that provides one command to pull open GitHub security alerts for all of your **public** repositories
+- Writes a self-contained HTML report that opens in a browser
 
 It collects:
 
@@ -41,7 +42,7 @@ $env:GITHUB_TOKEN = (gh auth token)
 python main.py
 ```
 
-That writes **`report.html`** and opens it in your browser. Do not use `-o report.json` — that was for an older CLI; `-o` is the HTML path now.
+That writes **`report.html`** and opens it in your browser.
 
 Useful options:
 

@@ -13,8 +13,15 @@ Every repo and alert links to the matching page on github.com. No local web serv
 
 ## Setup
 
-1. Create a [classic PAT](https://github.com/settings/tokens) with the `public_repo` scope  
-   (or a fine-grained token with Dependabot / code scanning / secret scanning alert read access).
+1. Create a [classic PAT](https://github.com/settings/tokens) with **both**:
+   - `public_repo`
+   - `security_events`  
+
+   `public_repo` alone can list public repos but is often **not enough** to read code scanning / Dependabot / secret scanning alerts. Without `security_events`, those endpoints may return 403 and the report will look falsely clean.
+
+   Or use a fine-grained token with Dependabot / code scanning / secret scanning alert **read** access.
+
+   Easiest option if you already use GitHub CLI: `$env:GITHUB_TOKEN = (gh auth token)`
 
 2. Install dependencies:
 

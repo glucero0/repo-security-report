@@ -422,16 +422,22 @@ def render_repo_section(repo: dict[str, Any]) -> str:
 
 def redact_sensitive_report(report: dict[str, Any]) -> dict[str, Any]:
     redacted = json.loads(json.dumps(report))
-    for repo in redacted.get("repositories", []):
-        repo["secret_scanning"] = []
-        if "counts" in repo and "secret_scanning" in repo["counts"]:
-            repo["counts"]["secret_scanning"] = 0
-    if "totals" in redacted and "secret_scanning" in redacted["totals"]:
-        redacted["totals"]["secret_scanning"] = 0
+
+    def _remove_secret_scanning_fields(value: Any) -> Any:
+        if isinstance(value, dict):
+            value.pop("secret_scanning", None)
+            for k, v in list(value.items()):
+                value[k] = _remove_secret_scanning_fields(v)
+            return value
+        if isinstance(value, list):
+            return [_remove_secret_scanning_fields(v) for v in value]
+        return value
+
+    redacted = _remove_secret_scanning_fields(redacted)
+    if "totals" in redacted:
         redacted["totals"]["open_alerts"] = (
             redacted["totals"].get("dependabot", 0)
             + redacted["totals"].get("code_scanning", 0)
-            + redacted["totals"].get("secret_scanning", 0)
         )
     return redacted
 

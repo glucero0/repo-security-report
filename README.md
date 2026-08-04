@@ -57,3 +57,11 @@ python main.py --user octocat     # scan another user's public repos
 
 - Console: progress per repo + summary counts
 - `report.html`: browsable report with severity badges and GitHub links
+
+## Tests
+
+```powershell
+python -m unittest test_report.py
+```
+
+These also run automatically on pushes to `main` and on pull requests via GitHub Actions.
